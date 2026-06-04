@@ -30,7 +30,8 @@
     "extensions": [
       "./src/index.ts"
     ],
-    "image": "https://raw.githubusercontent.com/snorreks/pi-content-offloader/master/assets/thumbnail.jpg"
+    "image": "https://raw.githubusercontent.com/snorreks/pi-content-offloader/master/assets/thumbnail.jpg",
+    "video": "https://raw.githubusercontent.com/snorreks/pi-content-offloader/master/assets/showcase.mp4"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
