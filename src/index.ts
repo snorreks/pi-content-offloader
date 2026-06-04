@@ -1,9 +1,9 @@
 /**
- * Auto-offloads large user inputs to /tmp/pi-offloads/.
+ * Auto-offloads large user inputs to <tmpdir>/pi-offloads/.
  *
  * Two-tier system:
  *   1. Explicit: `$offload [name]` marker to manually offload paste content
- *   2. Auto-detect: paste pattern matching + size thresholds
+ *   2. Auto-detect: paste pattern matching + size thresholds (can be disabled)
  *
  * Auto-detect thresholds:
  *   >2KB + paste/output patterns → always offload with smart preview
@@ -15,16 +15,21 @@
  * Smart previews: shows user's question/intent, not raw data dump.
  * Content types: build output, config dump, stack trace, table, task output.
  * Deduplicates by content hash. Auto-cleans files older than 7 days.
+ *
+ * Configuration:
+ *   PI_OFFLOADER_AUTO_DETECT=false  — disable auto-detect (default: true)
+ *   /offloader-toggle               — toggle auto-detect at runtime
  */
 
-import { createHash } from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
+import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 const HARD_MAX = 8000;
 const PASTE_THRESHOLD = 2000;
-const OFFLOAD_DIR = '/tmp/pi-offloads';
+const OFFLOAD_DIR = path.join(os.tmpdir(), 'pi-offloads');
 const PREVIEW_LINES = 10;
 const CLEANUP_DAYS = 7;
 const DEDUP_SIZE = 200;
@@ -39,7 +44,7 @@ try {
 const recentHashes = new Set<string>();
 
 function contentHash(text: string): string {
-  return createHash('sha256').update(text).digest('hex').slice(0, 12);
+  return crypto.createHash('sha256').update(text).digest('hex').slice(0, 12);
 }
 
 // ── Conversational detection ────────────────────────────────────
@@ -83,7 +88,7 @@ function parseOffload(text: string): OffloadResult | null {
   if (!match) return null;
 
   // $offload matches at any position — text before it is preserved as prefix
-  const markerStart = match.index!;
+  const markerStart = match.index as number;
   const beforeMarker = text.slice(0, markerStart).trim();
   const markerEnd = markerStart + match[0].length;
   let afterMarker = text.slice(markerEnd);
@@ -96,7 +101,7 @@ function parseOffload(text: string): OffloadResult | null {
 
   // Find the next $offload marker to scope this block's content boundary
   const nextOffload = afterMarker.match(EXPLICIT_MARKER);
-  const contentArea = nextOffload ? afterMarker.slice(0, nextOffload.index!) : afterMarker;
+  const contentArea = nextOffload ? afterMarker.slice(0, nextOffload.index as number) : afterMarker;
 
   // Find the separator between content and suffix within this block.
   // When another $offload follows: use FIRST separator (clear block boundary).
@@ -119,7 +124,7 @@ function parseOffload(text: string): OffloadResult | null {
   } else {
     for (let i = separatorMatches.length - 1; i >= 0; i--) {
       const sep = separatorMatches[i];
-      const sepEnd = sep.index! + sep[0].length;
+      const sepEnd = (sep.index as number) + sep[0].length;
       const testSuffix = contentArea.slice(sepEnd).trim();
       // Only split here if the suffix looks like a real user question,
       // not more machine output that should be offloaded too.
@@ -397,7 +402,28 @@ function findPasteBoundary(text: string): { pasteContent: string; suffix: string
 // ── Extension ───────────────────────────────────────────────────
 
 export default function offloader(pi: ExtensionAPI) {
-  pi.on('session_start', () => cleanup());
+  let autoDetect = process.env.PI_OFFLOADER_AUTO_DETECT?.toLowerCase() !== 'false';
+
+  pi.on('session_start', (_event, ctx) => {
+    cleanup();
+    if (!autoDetect) {
+      ctx.ui.setStatus('offloader', 'Auto-detect OFF');
+    }
+  });
+
+  pi.registerCommand('offloader-toggle', {
+    description: 'Toggle auto-detect on/off (Tier 2 paste detection)',
+    handler: async (_args, ctx) => {
+      autoDetect = !autoDetect;
+      const state = autoDetect ? 'ON' : 'OFF';
+      ctx.ui.notify(`Offloader auto-detect: ${state}`, 'info');
+      if (!autoDetect) {
+        ctx.ui.setStatus('offloader', 'Auto-detect OFF');
+      } else {
+        ctx.ui.setStatus('offloader', undefined);
+      }
+    },
+  });
 
   pi.on('input', (event) => {
     if (event.source !== 'interactive') return;
@@ -432,7 +458,9 @@ export default function offloader(pi: ExtensionAPI) {
       return { action: 'transform', text: result };
     }
 
-    // ── Tier 2: Auto-detect ───────────────────────────────────
+    // ── Tier 2: Auto-detect (skip if disabled) ───────────────────
+    if (!autoDetect) return;
+
     // Paste content >2KB → always offload (separate question with 2 blank lines)
     // Non-paste content >8KB → offload
     if (isPaste(text)) {
@@ -462,8 +490,11 @@ export default function offloader(pi: ExtensionAPI) {
 }
 
 export {
+  buildSummary,
   classify,
   cleanPreview,
+  contentHash,
+  explicitName,
   findPasteBoundary,
   isConversational,
   isPaste,

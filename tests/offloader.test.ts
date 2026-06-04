@@ -16,8 +16,11 @@
 
 import { describe, expect, it } from 'bun:test';
 import {
+  buildSummary,
   classify,
   cleanPreview,
+  contentHash,
+  explicitName,
   findPasteBoundary,
   isConversational,
   isPaste,
@@ -672,5 +675,244 @@ describe('parseOffload edge cases', () => {
     expect(result?.suffix).toContain('$offload');
     expect(result?.suffix).toContain('content2');
     expect(result?.suffix).toContain('how about that');
+  });
+
+  it('returns prefix with the $offload marker text', () => {
+    const input = '$offload my-logs\n\nErrors here';
+    const result = parseOffload(input);
+    expect(result).not.toBeNull();
+    expect(result?.prefix).toBe('$offload my-logs');
+  });
+
+  it('tracks start and end positions in original text', () => {
+    const input = '$offload\n\nLine 1\nLine 2';
+    const result = parseOffload(input);
+    expect(result).not.toBeNull();
+    expect(result?.start).toBe(0);
+    // Input after $offload + newline is 'Line 1\nLine 2'
+    expect(typeof result?.end).toBe('number');
+    if (result) {
+      expect(result.end).toBeGreaterThan(0);
+    }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// explicitName()
+// ═══════════════════════════════════════════════════════════════
+
+describe('explicitName', () => {
+  it('extracts name from $offload marker', () => {
+    expect(explicitName('$offload my-logs')).toBe('my-logs');
+    expect(explicitName('$offload prod-errors')).toBe('prod-errors');
+    expect(explicitName('$offload build_output.log')).toBe('build_output.log');
+  });
+
+  it('returns null when no name is provided', () => {
+    expect(explicitName('$offload')).toBeNull();
+    expect(explicitName('$offload ')).toBeNull();
+  });
+
+  it('returns name when only whitespace after name', () => {
+    expect(explicitName('$offload my-logs  ')).toBe('my-logs');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// contentHash()
+// ═══════════════════════════════════════════════════════════════
+
+describe('contentHash', () => {
+  it('returns a 12-character hex string', () => {
+    const hash = contentHash('hello world');
+    expect(hash).toHaveLength(12);
+    expect(/^[a-f0-9]+$/.test(hash)).toBe(true);
+  });
+
+  it('returns same hash for identical content', () => {
+    expect(contentHash('foo')).toBe(contentHash('foo'));
+  });
+
+  it('returns different hashes for different content', () => {
+    expect(contentHash('foo')).not.toBe(contentHash('bar'));
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// buildSummary()
+// ═══════════════════════════════════════════════════════════════
+
+describe('buildSummary', () => {
+  it('generates base summary with filepath, size, and line count', () => {
+    const summary = buildSummary(
+      '/tmp/pi-offloads/offload-abc123.txt',
+      'Error line 1\nError line 2\nError line 3'
+    );
+    expect(summary).toContain('📋 offloaded');
+    expect(summary).toContain('/tmp/pi-offloads/offload-abc123.txt');
+    expect(summary).toContain('3 lines');
+  });
+
+  it('includes kind label when provided', () => {
+    const summary = buildSummary('/tmp/x.txt', 'content', 'my custom kind');
+    expect(summary).toContain('my custom kind');
+  });
+
+  it('auto-classifies content when no kind is given', () => {
+    const summary = buildSummary('/tmp/x.txt', 'app.js  12.3 kB  gzip  4.5 kB');
+    expect(summary).toContain('build output');
+  });
+
+  it('skips preview when includePreview is false', () => {
+    const content = 'Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6\nLine 7';
+    const summary = buildSummary('/tmp/x.txt', content, undefined, false);
+    expect(summary).toContain('📋 offloaded');
+    expect(summary).not.toContain('Line 1');
+  });
+
+  it('includes preview by default', () => {
+    const content = 'Line 1\nLine 2';
+    const summary = buildSummary('/tmp/x.txt', content);
+    expect(summary).toContain('📋 offloaded');
+    expect(summary).toContain('Line 1');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// isPaste — additional signals
+// ═══════════════════════════════════════════════════════════════
+
+describe('isPaste additional signals', () => {
+  it('detects 100+ line content as paste', () => {
+    const lines = Array.from({ length: 101 }, (_, i) => `Line ${i}`);
+    expect(isPaste(lines.join('\n'))).toBe(true);
+  });
+
+  it('does not flag 99 lines as paste if no other signals', () => {
+    const lines = Array.from({ length: 99 }, (_, i) => `Line ${i}`);
+    expect(isPaste(lines.join('\n'))).toBe(false);
+  });
+
+  it('detects PANIC and CRITICAL labels', () => {
+    expect(isPaste('2026-06-04 PANIC: kernel oops')).toBe(true);
+    expect(isPaste('2026-06-04 CRITICAL: disk full')).toBe(true);
+  });
+
+  it('detects serviceAccount pattern', () => {
+    expect(isPaste('serviceAccount: my-service@project.iam.gserviceaccount.com')).toBe(true);
+  });
+
+  it('detects CLI log prefixes', () => {
+    expect(isPaste('i  functions: Loaded functions firebase/firestore-onWrite')).toBe(true);
+    expect(isPaste('>  log something')).toBe(true);
+    expect(isPaste('⚠  Multiple exports found')).toBe(true);
+  });
+
+  it('detects script milestone lines', () => {
+    expect(isPaste('firebase Emulation seed: completed in 2.3s')).toBe(true);
+    expect(isPaste('script Running: deploy.sh')).toBe(true);
+    expect(isPaste('dotenvx Starting: inject phase')).toBe(true);
+  });
+
+  it('detects diamond/lozenge symbols', () => {
+    expect(isPaste('◇ injected env (0) from .env')).toBe(true);
+  });
+
+  it('detects warning signs', () => {
+    expect(isPaste('⚠ Multiple database instances detected')).toBe(true);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// classify — additional content types
+// ═══════════════════════════════════════════════════════════════
+
+describe('classify additional types', () => {
+  it('classifies task output by ▮ marker', () => {
+    expect(classify('▮ Task started\n▮ Task completed')).toBe('task output');
+  });
+
+  it('classifies Uncaught errors as log output when timestamped', () => {
+    expect(classify('[2026-06-04 14:32:01] Uncaught TypeError: foo is not a function')).toBe(
+      'log output'
+    );
+  });
+
+  it('does NOT classify box-drawing in non-first checks as log output', () => {
+    // Box-drawing check comes before log output check
+    expect(classify('┌──┐\n│ x│\n└──┘')).toBe('table');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// cleanPreview — additional edge cases
+// ═══════════════════════════════════════════════════════════════
+
+describe('cleanPreview additional cases', () => {
+  it('shows task output preview for ▮ content', () => {
+    const text = '▮ Step 1\n▮ Step 2\n▮ Step 3\n▮ Step 4\n▮ Step 5';
+    const preview = cleanPreview(text);
+    expect(preview).toContain('▮ Step 1');
+    expect(preview).toContain('▮ Step 5');
+  });
+
+  it('shows table preview with first 10 lines for │ tables', () => {
+    const rows = Array.from({ length: 15 }, (_, i) => `│ row ${i + 1} │ value │`);
+    const text = rows.join('\n');
+    const preview = cleanPreview(text);
+    expect(preview.split('\n').length).toBeLessThanOrEqual(10);
+    expect(preview).toContain('row 1');
+  });
+
+  it('handles error with only one error line and no frames', () => {
+    const text = 'Error: Something went wrong';
+    const preview = cleanPreview(text);
+    expect(preview).toContain('Error: Something went wrong');
+  });
+
+  it('handles fatal-only log without at-frames', () => {
+    const text = 'FATAL: Out of memory\nProcess terminated';
+    const preview = cleanPreview(text);
+    expect(preview).toContain('FATAL: Out of memory');
+  });
+
+  it('trims empty leading lines in default preview', () => {
+    const lines = ['', '', 'Actual content line 1', 'Actual content line 2'];
+    const preview = cleanPreview(lines.join('\n'));
+    expect(preview).toContain('Actual content line 1');
+    // No leading newlines — content starts immediately
+    expect(preview.startsWith('\n')).toBe(false);
+    expect(preview.split('\n')[0]).toBe('Actual content line 1');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// isConversational — additional edge cases
+// ═══════════════════════════════════════════════════════════════
+
+describe('isConversational additional cases', () => {
+  it('returns false for empty string', () => {
+    expect(isConversational('')).toBe(false);
+  });
+
+  it('returns false for whitespace-only', () => {
+    expect(isConversational('   \n  \n  ')).toBe(false);
+  });
+
+  it('detects imperative-only text as conversational', () => {
+    expect(isConversational('Please check the logs and create a fix')).toBe(true);
+  });
+
+  it('detects greeting + imperative combo', () => {
+    expect(isConversational('Hey add logging')).toBe(true);
+  });
+
+  it('returns true for code block + question', () => {
+    const text = '```js\nconst x = 1;\n```\n\nWhat does x equal?';
+    expect(isConversational(text)).toBe(true);
+  });
+
+  it('returns false for pure symbol-heavy text', () => {
+    expect(isConversational('=== RUN foo ===\n--- PASS: foo (0.01s)\n=== RUN bar ---')).toBe(false);
   });
 });
