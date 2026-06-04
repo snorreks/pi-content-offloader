@@ -1,0 +1,47 @@
+{
+  "name": "pi-content-offloader",
+  "version": "0.1.0",
+  "description": "Auto-offloads large user inputs in pi to /tmp/pi-offloads/ — explicit $offload markers and auto-detect for paste content >2KB",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "offload",
+    "pi"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./package.json": "./package.json"
+  },
+  "main": "./src/index.ts",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "lint": "bunx @biomejs/biome check .",
+    "lint:fix": "bunx @biomejs/biome check --write .",
+    "format": "bunx @biomejs/biome format .",
+    "clean": "rm -rf node_modules dist"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.0",
+    "@types/bun": "latest",
+    "typescript": "^5.8.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/snorre/pi-content-offloader.git"
+  },
+  "bugs": {
+    "url": "https://github.com/snorre/pi-content-offloader/issues"
+  },
+  "homepage": "https://github.com/snorre/pi-content-offloader#readme"
+}
