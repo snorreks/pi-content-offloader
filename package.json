@@ -29,7 +29,8 @@
   "pi": {
     "extensions": [
       "./src/index.ts"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/snorreks/pi-content-offloader/master/assets/showcase.gif"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
