@@ -1,6 +1,6 @@
 {
   "name": "pi-content-offloader",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Auto-offloads large user inputs in pi to a temporary directory — explicit $offload markers and auto-detect for paste content >2KB",
   "keywords": [
     "pi-package",
