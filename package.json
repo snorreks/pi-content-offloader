@@ -41,10 +41,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/snorre/pi-content-offloader.git"
+    "url": "git+https://github.com/snorreks/pi-content-offloader.git"
   },
   "bugs": {
-    "url": "https://github.com/snorre/pi-content-offloader/issues"
+    "url": "https://github.com/snorreks/pi-content-offloader/issues"
   },
-  "homepage": "https://github.com/snorre/pi-content-offloader#readme"
+  "homepage": "https://github.com/snorreks/pi-content-offloader#readme"
 }
