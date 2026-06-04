@@ -474,7 +474,7 @@ export default function offloader(pi: ExtensionAPI) {
 
     try {
       const { filepath } = writeLog(pasteContent);
-      const summary = buildSummary(filepath, pasteContent);
+      const summary = buildSummary(filepath, pasteContent, undefined, false);
 
       const parts = [summary];
       if (suffix) {
