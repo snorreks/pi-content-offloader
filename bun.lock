@@ -5,7 +5,7 @@
     "": {
       "name": "pi-extension-offloader",
       "devDependencies": {
-        "@biomejs/biome": "^2.4.0",
+        "@biomejs/biome": "^2.4.16",
         "@types/bun": "latest",
         "typescript": "^5.8.0",
       },

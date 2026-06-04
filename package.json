@@ -1,6 +1,6 @@
 {
   "name": "pi-content-offloader",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Auto-offloads large user inputs in pi to /tmp/pi-offloads/ — explicit $offload markers and auto-detect for paste content >2KB",
   "keywords": [
     "pi-package",
@@ -16,11 +16,14 @@
   },
   "main": "./src/index.ts",
   "scripts": {
+    "build": "bun run build.ts",
+    "publish": "bun run ./build.ts && cd dist && bunx npm publish --access public",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "lint": "bunx @biomejs/biome check .",
-    "lint:fix": "bunx @biomejs/biome check --write .",
-    "format": "bunx @biomejs/biome format .",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "fix": "biome check --write .",
+    "check": "tsc --noEmit",
     "clean": "rm -rf node_modules dist"
   },
   "pi": {
@@ -32,7 +35,7 @@
     "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.0",
+    "@biomejs/biome": "^2.4.16",
     "@types/bun": "latest",
     "typescript": "^5.8.0"
   },
