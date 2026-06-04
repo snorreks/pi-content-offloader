@@ -1,6 +1,6 @@
 {
   "name": "pi-content-offloader",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Auto-offloads large user inputs in pi to /tmp/pi-offloads/ — explicit $offload markers and auto-detect for paste content >2KB",
   "keywords": [
     "pi-package",
