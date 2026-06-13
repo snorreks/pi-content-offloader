@@ -187,9 +187,20 @@ function isPaste(text: string): boolean {
   const lines = text.split('\n');
   if (lines.length > 100) return true;
   if (/[\u2500-\u257F┌┬┐├┼┤└┴┘│─]/.test(text)) return true;
+
+  // Text starts with a shell prompt — strong CLI copy-paste signal
+  if (isCliPaste(text)) return true;
+
+  // CLI session: multiple prompt lines (commands + output)
+  const promptLineCount = lines.filter((l) => isCliPaste(l)).length;
+  if (promptLineCount >= 2) return true;
+
   const signals = [
     /\[?\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/m, // ISO timestamps (bare or [bracketed])
-    /^\s+at\s+.+\(.+:\d+:\d+\)/m, // Stack frames
+    /^\s+at\s+.+\(.+:\d+:\d+\)/m, // Node.js stack frames: "    at fn (file.js:1:2)"
+    /^\s*\S.*@\s+\S+\.\w+:\d+/m, // Browser stack frames: " (anonymous) @ file.js:946" or "Ec @ file.js:946"
+    /^\S+\.(js|jsx|ts|tsx|mjs|cjs):\d+/m, // Browser console start: "file.js:123 message"
+    /\.(js|jsx|ts|tsx|mjs|cjs):\d+$/m, // Browser console end: "message file.js:123"
     /\b(ERROR|FATAL|PANIC|CRITICAL)\b/i,
     /▮/,
     /\.(js|ts|css)\s+\d+\.\d+\s*kB.*gzip/m,
@@ -206,9 +217,24 @@ function isPaste(text: string): boolean {
   return signals.filter((p) => p.test(text)).length >= 1;
 }
 
+// ── CLI copy-paste detection ──────────────────────────────────
+
+/** Detects text that starts with a shell prompt — someone copy-pasted from a terminal. */
+function isCliPaste(text: string): boolean {
+  return /^\s*[❯$#>➜]\s/.test(text);
+}
+
+/** Detects browser console output — lines matching `file.js:line` pattern. */
+function isBrowserLog(text: string): boolean {
+  return (
+    /^\S+\.(js|jsx|ts|tsx|mjs|cjs):\d+/m.test(text) || /\.(js|jsx|ts|tsx|mjs|cjs):\d+$/m.test(text)
+  );
+}
+
 function classify(text: string): string {
-  // Stack traces: clearly structured error frames
+  // Stack traces: Node.js "at fn (file:1:2)" or browser "fn @ file.js:946"
   if (/^\s*at\s+.+\(.+:\d+:\d+\)/m.test(text)) return 'stack trace';
+  if (/^\s+\S.*@\s+\S+\.\w+:\d+/m.test(text)) return 'stack trace';
   // Build output: chunk stats with kB
   if (/\.(js|ts|css)\s+\d+\.\d+\s*kB.*gzip/.test(text)) return 'build output';
   // Config dumps: Firebase / service account keys
@@ -249,13 +275,17 @@ function cleanPreview(text: string): string {
   }
 
   // Error/stack trace → first + last error + frames
-  if (/^\s*at\s+.+\(.+:\d+:\d+\)/m.test(text) || /\b(ERROR|FATAL|PANIC|Uncaught)\b/.test(text)) {
+  const isNodeStack = /^\s*at\s+.+\(.+:\d+:\d+\)/m.test(text);
+  const isBrowserStack = /^\s+\S.*@\s+\S+\.\w+:\d+/m.test(text);
+  if (isNodeStack || isBrowserStack || /\b(ERROR|FATAL|PANIC|Uncaught)\b/.test(text)) {
     const errorLines = lines.filter((l) =>
       /\b(Error|Exception|Fatal|PANIC|Uncaught|Cannot|failed)\b/i.test(l)
     );
     const firstError = errorLines[0];
     const lastError = errorLines[errorLines.length - 1];
-    const frames = lines.filter((l) => /^\s*at\s+/.test(l)).slice(0, 5);
+    const frames = lines
+      .filter((l) => (isBrowserStack ? /^\s*\S.*@\s+\S+\.\w+:\d+/m.test(l) : /^\s*at\s+/.test(l)))
+      .slice(0, 5);
 
     const result: string[] = [];
     if (firstError) result.push(firstError);
@@ -360,7 +390,48 @@ function buildSummary(
   return base;
 }
 
-// ── Paste boundary detection ───────────────────────────────────
+// ── Multi-paste block detection ────────────────────────────────
+
+/** Splits a paste input into multiple paste blocks + a conversational suffix.
+ *  When two log/data blocks are separated by 2+ blank lines, each is offloaded
+ *  separately so the user sees distinct summaries instead of one giant blob. */
+function findAllPasteBlocks(text: string): { pasteBlocks: string[]; suffix: string } {
+  const sepRe = /\n\s*\n\s*\n/g;
+  const separators = [...text.matchAll(sepRe)];
+
+  if (separators.length === 0) {
+    return { pasteBlocks: [text], suffix: '' };
+  }
+
+  // Split text into blocks at each separator, trim each
+  const blocks: string[] = [];
+  let pos = 0;
+  for (const sep of separators) {
+    blocks.push(text.slice(pos, sep.index as number).trim());
+    pos = (sep.index as number) + sep[0].length;
+  }
+  blocks.push(text.slice(pos).trim());
+
+  const meaningful = blocks.filter(Boolean);
+  if (meaningful.length === 0) return { pasteBlocks: [], suffix: '' };
+
+  // Simple forward pass: each block is either paste (offload it) or
+  // conversational (keep as suffix).
+  const pasteBlocks: string[] = [];
+  const suffixParts: string[] = [];
+
+  for (const block of meaningful) {
+    if (isPaste(block)) {
+      pasteBlocks.push(block);
+    } else {
+      suffixParts.push(block);
+    }
+  }
+
+  return { pasteBlocks, suffix: suffixParts.join('\n\n') };
+}
+
+// ── Paste boundary detection (single-block, legacy) ───────────
 
 function findPasteBoundary(text: string): { pasteContent: string; suffix: string } {
   // Require exactly 2+ blank lines as separator — paste content can have
@@ -462,21 +533,39 @@ export default function offloader(pi: ExtensionAPI) {
     if (!autoDetect) return;
 
     // Paste content >2KB → always offload (separate question with 2 blank lines)
+    // CLI copy-paste (starts with ❯ / $ / # etc.): offload regardless of size
     // Non-paste content >8KB → offload
+    const cliCopy = isCliPaste(text);
+    const browserLog = isBrowserLog(text);
     if (isPaste(text)) {
-      if (len <= PASTE_THRESHOLD) return;
+      if (len <= PASTE_THRESHOLD && !cliCopy && !browserLog) return;
     } else {
       if (len <= HARD_MAX) return;
     }
 
-    // Find the boundary between paste content and user's question (suffix).
-    const { pasteContent, suffix } = findPasteBoundary(text);
+    // Split into paste blocks + user's conversational suffix.
+    // Multiple log blocks (e.g. two stack traces separated by 2 blank lines)
+    // are combined into a single offload file instead of separate summaries.
+    const { pasteBlocks, suffix } = findAllPasteBlocks(text);
 
     try {
-      const { filepath } = writeLog(pasteContent);
-      const summary = buildSummary(filepath, pasteContent, undefined, false);
+      const parts: string[] = [];
 
-      const parts = [summary];
+      if (pasteBlocks.length === 1) {
+        const { filepath } = writeLog(pasteBlocks[0]);
+        parts.push(buildSummary(filepath, pasteBlocks[0], undefined, false));
+      } else if (pasteBlocks.length > 1) {
+        // Combine multiple paste blocks into one file with separators
+        const combined = pasteBlocks.join('\n\n---\n\n');
+        const { filepath } = writeLog(combined);
+        const totalKb = Math.round(combined.length / 1024);
+        const totalLines = combined.split('\n').length;
+        const kindLabel = classify(combined);
+        parts.push(
+          `📋 offloaded ${pasteBlocks.length} ${kindLabel} blocks (${totalKb}KB, ${totalLines} lines) → read ${filepath}`
+        );
+      }
+
       if (suffix) {
         parts.push('');
         parts.push(suffix);
@@ -495,7 +584,10 @@ export {
   cleanPreview,
   contentHash,
   explicitName,
+  findAllPasteBlocks,
   findPasteBoundary,
+  isBrowserLog,
+  isCliPaste,
   isConversational,
   isPaste,
   offloader,

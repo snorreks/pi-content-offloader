@@ -21,11 +21,74 @@ import {
   cleanPreview,
   contentHash,
   explicitName,
+  findAllPasteBlocks,
   findPasteBoundary,
+  isBrowserLog,
+  isCliPaste,
   isConversational,
   isPaste,
   parseOffload,
 } from '../src/index.ts';
+
+// ═══════════════════════════════════════════════════════════════
+// isBrowserLog()
+// ═══════════════════════════════════════════════════════════════
+
+describe('isBrowserLog', () => {
+  it('detects *.js:line pattern as browser console', () => {
+    expect(isBrowserLog('CoYrXo8u.js:946 Failed to create WebGPU')).toBe(true);
+    expect(isBrowserLog('app.ts:42 some message')).toBe(true);
+    expect(isBrowserLog('utils.mjs:1 starting')).toBe(true);
+  });
+
+  it('returns false for normal text', () => {
+    expect(isBrowserLog('Hey, can you fix this?')).toBe(false);
+    expect(isBrowserLog('I need help with deployment')).toBe(false);
+  });
+
+  it('detects lines ending with *.js:line', () => {
+    expect(isBrowserLog('Error in worker app.js:42')).toBe(true);
+    expect(isBrowserLog('worker.onerror @ app.js:201')).toBe(true);
+  });
+
+  it('returns false for *.js:line in middle of sentence', () => {
+    // "file.js:line" in the middle without context isn't browser log
+    expect(isBrowserLog('Check app.js:42 for the fix')).toBe(false);
+  });
+
+  it('returns false for conversational file references', () => {
+    expect(isBrowserLog('Check index.ts:42 for the bug')).toBe(false);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// isCliPaste()
+// ═══════════════════════════════════════════════════════════════
+
+describe('isCliPaste', () => {
+  it('detects text starting with ❯ as CLI paste', () => {
+    expect(isCliPaste('❯ npm test')).toBe(true);
+    expect(isCliPaste('❯ git status')).toBe(true);
+    expect(isCliPaste('  ❯ ls -la')).toBe(true);
+  });
+
+  it('detects text starting with $ or # prompts', () => {
+    expect(isCliPaste('$ npm install')).toBe(true);
+    expect(isCliPaste('# apt update')).toBe(true);
+    expect(isCliPaste('  $ make build')).toBe(true);
+  });
+
+  it('returns false for non-CLI text', () => {
+    expect(isCliPaste('Hey, can you fix this?')).toBe(false);
+    expect(isCliPaste('It costs $5')).toBe(false);
+    expect(isCliPaste('  plain text')).toBe(false);
+  });
+
+  it('returns false for empty or whitespace-only text', () => {
+    expect(isCliPaste('')).toBe(false);
+    expect(isCliPaste('   ')).toBe(false);
+  });
+});
 
 // ═══════════════════════════════════════════════════════════════
 // isConversational()
@@ -232,9 +295,77 @@ describe('isPaste', () => {
     expect(isPaste('  ❯ something went wrong')).toBe(true);
   });
 
+  it('detects text starting with ❯ as CLI copy-paste', () => {
+    expect(isPaste('❯ npm test')).toBe(true);
+    expect(isPaste('❯ git status')).toBe(true);
+    expect(isPaste('  ❯ ls -la')).toBe(true);
+    expect(isPaste('❯ cat error.log\nERROR: something broke')).toBe(true);
+  });
+
+  it('detects text starting with $ or # shell prompts as paste', () => {
+    expect(isPaste('$ npm install')).toBe(true);
+    expect(isPaste('# apt update')).toBe(true);
+    expect(isPaste('  $ make build')).toBe(true);
+  });
+
+  it('detects CLI session with multiple prompt lines as paste', () => {
+    expect(isPaste('$ npm test\nFAIL test1\n$ npm test\nPASS')).toBe(true);
+    expect(isPaste('❯ ls\nfile.txt\n❯ cat file.txt')).toBe(true);
+    expect(isPaste('# whoami\nroot\n# uptime')).toBe(true);
+  });
+
+  it('returns false for single $ or # without CLI context', () => {
+    // A single $ in prose, not a prompt
+    expect(isPaste('It costs $5')).toBe(false);
+  });
+
   it('returns false for short conversational text', () => {
     expect(isPaste('Hey, can you fix this?')).toBe(false);
     expect(isPaste('I need help with deployment')).toBe(false);
+  });
+
+  it('detects browser stack traces as paste', () => {
+    const trace = [
+      'CoYrXo8u.js:946 Failed to create WebGPU Context Provider',
+      '(anonymous) @ CoYrXo8u.js:946',
+      'Ec @ CoYrXo8u.js:946',
+      'Oc @ CoYrXo8u.js:946',
+      'init @ CoYrXo8u.js:946',
+    ].join('\n');
+    expect(isPaste(trace)).toBe(true);
+  });
+
+  it('detects browser stack traces with leading spaces too', () => {
+    const trace = [
+      'CoYrXo8u.js:946 Failed to create WebGPU',
+      ' (anonymous) @ CoYrXo8u.js:946',
+      ' Ec @ CoYrXo8u.js:946',
+    ].join('\n');
+    expect(isPaste(trace)).toBe(true);
+  });
+
+  it('detects browser error headers as paste', () => {
+    expect(isPaste('app.js:42 Failed to load resource')).toBe(true);
+    expect(isPaste('utils.ts:128 Uncaught TypeError: x is not a function')).toBe(true);
+  });
+
+  it('detects any *.js:line console output as paste', () => {
+    expect(isPaste('CaUv3mXG.js:1 15:50 [SandboxViewModel] sandbox:initializeEngine:start')).toBe(
+      true
+    );
+    expect(isPaste('DfJ3EOmO.js:201 [GameWorld] Using provided workerFactory')).toBe(true);
+    expect(isPaste('worker.js:5 processing')).toBe(true);
+  });
+
+  it('detects lines ending with *.js:line as paste', () => {
+    expect(isPaste('Error occurred in app.js:42')).toBe(true);
+    expect(isPaste('worker.onerror @ app.js:201')).toBe(true);
+    expect(isPaste('Uncaught in utils.ts:128')).toBe(true);
+  });
+
+  it('returns false for conversational text with file references', () => {
+    // "file.js:1" without error keyword in normal conversation
+    expect(isPaste('Let me check src/index.ts:42 for the bug')).toBe(false);
   });
 });
 
@@ -282,6 +413,11 @@ describe('classify', () => {
 
   it("defaults to 'content' for unrecognized text", () => {
     expect(classify('Just some plain text')).toBe('content');
+  });
+
+  it('classifies browser stack traces', () => {
+    expect(classify(' (anonymous) @ CoYrXo8u.js:946\n Ec @ CoYrXo8u.js:946')).toBe('stack trace');
+    expect(classify('init @ app.js:42\n render @ app.js:100')).toBe('stack trace');
   });
 });
 
@@ -356,6 +492,19 @@ describe('cleanPreview', () => {
     const preview = cleanPreview(text);
     const previewLines = preview.split('\n');
     expect(previewLines.length).toBeLessThanOrEqual(10);
+  });
+
+  it('shows browser stack trace preview with error + frames', () => {
+    const trace = [
+      'CoYrXo8u.js:946 Failed to create WebGPU Context Provider',
+      ' (anonymous) @ CoYrXo8u.js:946',
+      ' Ec @ CoYrXo8u.js:946',
+      ' Oc @ CoYrXo8u.js:946',
+      ' init @ CoYrXo8u.js:946',
+    ].join('\n');
+    const preview = cleanPreview(trace);
+    expect(preview).toContain('Failed to create WebGPU');
+    expect(preview).toContain('@');
   });
 });
 
@@ -506,6 +655,59 @@ describe('findPasteBoundary', () => {
     // Suffix has ISO timestamp → isPaste(suffix)=true → merged back into paste
     expect(result.pasteContent).toBe(text);
     expect(result.suffix).toBe('');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// findAllPasteBlocks()
+// ═══════════════════════════════════════════════════════════════
+
+describe('findAllPasteBlocks', () => {
+  it('returns single paste block when no separator', () => {
+    const trace = 'CoYrXo8u.js:946 Failed to create WebGPU\n (anonymous) @ CoYrXo8u.js:946';
+    const result = findAllPasteBlocks(trace);
+    expect(result.pasteBlocks).toHaveLength(1);
+    expect(result.pasteBlocks[0]).toBe(trace);
+    expect(result.suffix).toBe('');
+  });
+
+  it('splits paste from conversational suffix', () => {
+    const text = [
+      'ERROR: Connection timeout',
+      'ERROR: Retry failed',
+      '',
+      '',
+      'Can you investigate this?',
+    ].join('\n');
+    const result = findAllPasteBlocks(text);
+    expect(result.pasteBlocks).toHaveLength(1);
+    expect(result.suffix).toBe('Can you investigate this?');
+  });
+
+  it('splits two paste blocks into separate offloads', () => {
+    const trace1 = [
+      'CoYrXo8u.js:946 Failed to create WebGPU Context Provider',
+      ' (anonymous) @ CoYrXo8u.js:946',
+      ' Ec @ CoYrXo8u.js:946',
+    ].join('\n');
+    const trace2 = [
+      'CoYrXo8u.js:946 Failed to create WebGPU Context Provider',
+      ' (anonymous) @ CoYrXo8u.js:946',
+      ' Ec @ CoYrXo8u.js:946',
+    ].join('\n');
+    const text = [trace1, '', '', trace2].join('\n');
+    const result = findAllPasteBlocks(text);
+    expect(result.pasteBlocks).toHaveLength(2);
+    expect(result.suffix).toBe('');
+  });
+
+  it('splits two paste blocks + conversational suffix', () => {
+    const trace1 = 'app.js:42 Failed to load';
+    const trace2 = 'utils.ts:128 Uncaught TypeError';
+    const text = [trace1, '', '', trace2, '', '', 'Can you fix these errors?'].join('\n');
+    const result = findAllPasteBlocks(text);
+    expect(result.pasteBlocks).toHaveLength(2);
+    expect(result.suffix).toBe('Can you fix these errors?');
   });
 });
 
