@@ -900,6 +900,172 @@ describe('parseOffload edge cases', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+// parseOffload with $/offload end marker
+// ═══════════════════════════════════════════════════════════════
+
+describe('parseOffload with $/offload end marker', () => {
+  it('offloads content between $offload and $/offload markers', () => {
+    const input = [
+      '$offload build-logs',
+      '',
+      'app.js  123.4 kB  gzip  45.2 kB',
+      'about.js  12.3 kB  gzip   4.1 kB',
+      '$/offload',
+      '',
+      'Why is the dashboard chunk so large?',
+    ].join('\n');
+
+    const result = parseOffload(input);
+    expect(result).not.toBeNull();
+    expect(result?.content).toBe(
+      'app.js  123.4 kB  gzip  45.2 kB\nabout.js  12.3 kB  gzip   4.1 kB'
+    );
+    expect(result?.prefix).toBe('$offload build-logs');
+    expect(result?.suffix).toBe('Why is the dashboard chunk so large?');
+  });
+
+  it('offloads content with $/offload and no suffix', () => {
+    const input = ['$offload', '', 'Error line 1', 'Error line 2', '$/offload'].join('\n');
+
+    const result = parseOffload(input);
+    expect(result).not.toBeNull();
+    expect(result?.content).toBe('Error line 1\nError line 2');
+    expect(result?.suffix).toBe('');
+  });
+
+  it('handles $/offload with text before $offload marker', () => {
+    const input = [
+      'Some preamble text',
+      '',
+      '$offload',
+      'content to offload',
+      '$/offload',
+      '',
+      'Now my question?',
+    ].join('\n');
+
+    const result = parseOffload(input);
+    expect(result).not.toBeNull();
+    expect(result?.content).toBe('content to offload');
+    expect(result?.beforeText).toBe('Some preamble text');
+    expect(result?.suffix).toBe('Now my question?');
+  });
+
+  it('uses $/offload as boundary even when double blank lines exist in content', () => {
+    const input = [
+      '$offload logs',
+      '',
+      'Paragraph one of content.',
+      '',
+      '',
+      'Paragraph two — still content.',
+      '',
+      'Paragraph three.',
+      '$/offload',
+      '',
+      'My question?',
+    ].join('\n');
+
+    const result = parseOffload(input);
+    expect(result).not.toBeNull();
+    // All paragraphs before $/offload are content (no blank-line split)
+    expect(result?.content).toContain('Paragraph one');
+    expect(result?.content).toContain('Paragraph two');
+    expect(result?.content).toContain('Paragraph three');
+    expect(result?.suffix).toBe('My question?');
+  });
+
+  it('handles multiple $offload...$/offload blocks sequentially', () => {
+    // parseOffload only parses the first block — the input handler loop processes multiple
+    const input = [
+      '$offload first',
+      'content one',
+      '$/offload',
+      '',
+      '$offload second',
+      'content two',
+      '$/offload',
+    ].join('\n');
+
+    const result = parseOffload(input);
+    expect(result).not.toBeNull();
+    expect(result?.content).toBe('content one');
+    expect(result?.prefix).toBe('$offload first');
+    // suffix contains the second $offload block
+    expect(result?.suffix).toContain('$offload second');
+    expect(result?.suffix).toContain('content two');
+  });
+
+  it('handles $/offload immediately after $offload (empty content)', () => {
+    const input = ['$offload empty', '$/offload', '', 'Just asking a question'].join('\n');
+
+    const result = parseOffload(input);
+    expect(result).not.toBeNull();
+    expect(result?.content).toBe('');
+    expect(result?.suffix).toBe('Just asking a question');
+  });
+
+  it('falls back to double-blank-line when no $/offload present', () => {
+    const input = [
+      '$offload logs',
+      '',
+      'Error line 1',
+      'Error line 2',
+      '',
+      '',
+      'Can you fix this?',
+    ].join('\n');
+
+    const result = parseOffload(input);
+    expect(result).not.toBeNull();
+    expect(result?.content).toBe('Error line 1\nError line 2');
+    expect(result?.suffix).toBe('Can you fix this?');
+  });
+
+  it('falls back to next $offload when no $/offload present', () => {
+    const input = ['$offload first', 'content 1', '', '$offload second', 'content 2'].join('\n');
+
+    const result = parseOffload(input);
+    expect(result).not.toBeNull();
+    expect(result?.content).toContain('content 1');
+    // suffix includes the second $offload block
+    expect(result?.suffix).toContain('$offload second');
+    expect(result?.suffix).toContain('content 2');
+  });
+
+  it('$offload without $/offload and no separator — all remaining is content', () => {
+    const input = '$offload\nJust some data\nMore data';
+
+    const result = parseOffload(input);
+    expect(result).not.toBeNull();
+    expect(result?.content).toBe('Just some data\nMore data');
+    expect(result?.suffix).toBe('');
+  });
+
+  it('tracks correct start and end positions for $/offload block', () => {
+    const input = '$offload\n\nLine 1\nLine 2\n$/offload\nQuestion?';
+
+    const result = parseOffload(input);
+    expect(result).not.toBeNull();
+    expect(result?.start).toBe(0);
+    // end should be right after $/offload + trailing newline, covering both markers + content
+    if (result) {
+      expect(result.end).toBeGreaterThan(0);
+      // Verify replacement works: slice from start to end removes markers and content
+      const replaced = `${input.slice(0, result.start)}[SUMMARY]${input.slice(result.end)}`;
+      expect(replaced).toBe('[SUMMARY]Question?');
+    }
+  });
+
+  it('ignores $/offload that appears before any $offload marker', () => {
+    // $/offload alone without a preceding $offload is ignored
+    const input = '$/offload\nSome content here';
+    const result = parseOffload(input);
+    expect(result).toBeNull();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
 // explicitName()
 // ═══════════════════════════════════════════════════════════════
 

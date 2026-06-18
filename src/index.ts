@@ -1,9 +1,21 @@
 /**
- * Auto-offloads large user inputs to <tmpdir>/pi-offloads/.
+ * Offloads user content to <tmpdir>/pi-offloads/.
  *
- * Two-tier system:
- *   1. Explicit: `$offload [name]` marker to manually offload paste content
- *   2. Auto-detect: paste pattern matching + size thresholds (can be disabled)
+ * Two modes:
+ *   1. Stable (default): explicit `$offload [name]` ... `$/offload` markers
+ *      — only offloads content between these markers. No accidental offloads.
+ *   2. Auto-detect (opt-in): paste pattern matching + size thresholds
+ *      — enable with PI_OFFLOADER_AUTO_DETECT=true or /offloader-toggle
+ *
+ * Stable mode: wrap paste content between $offload and $/offload:
+ *   $offload build-logs
+ *   app.js  123.4 kB  gzip  45.2 kB
+ *   ...
+ *   $/offload
+ *   Why is the dashboard chunk so large?
+ *
+ * Fallback (no $/offload): content ends at double blank line with conversational
+ * text after it, or at the next $offload marker.
  *
  * Auto-detect thresholds:
  *   >2KB + paste/output patterns → always offload with smart preview
@@ -17,8 +29,8 @@
  * Deduplicates by content hash. Auto-cleans files older than 7 days.
  *
  * Configuration:
- *   PI_OFFLOADER_AUTO_DETECT=false  — disable auto-detect (default: true)
- *   /offloader-toggle               — toggle auto-detect at runtime
+ *   PI_OFFLOADER_AUTO_DETECT=true   — enable auto-detect (default: false)
+ *   /offloader-toggle                — toggle auto-detect at runtime
  */
 
 import * as crypto from 'node:crypto';
@@ -33,7 +45,8 @@ const OFFLOAD_DIR = path.join(os.tmpdir(), 'pi-offloads');
 const PREVIEW_LINES = 10;
 const CLEANUP_DAYS = 7;
 const DEDUP_SIZE = 200;
-const EXPLICIT_MARKER = /^\$offload[^\n\r]*/m;
+const EXPLICIT_MARKER = /^\$offload(?!\/)[^\n\r]*/m;
+const EXPLICIT_END_MARKER = /^\$\/offload[^\n\r]*/m;
 
 try {
   fs.mkdirSync(OFFLOAD_DIR, { recursive: true });
@@ -99,39 +112,71 @@ function parseOffload(text: string): OffloadResult | null {
     afterMarker = afterMarker.slice(leadingGap[0].length);
   }
 
-  // Find the next $offload marker to scope this block's content boundary
+  // Find the $/offload end marker (preferred) and next $offload marker
+  const endMarker = afterMarker.match(EXPLICIT_END_MARKER);
   const nextOffload = afterMarker.match(EXPLICIT_MARKER);
-  const contentArea = nextOffload ? afterMarker.slice(0, nextOffload.index as number) : afterMarker;
 
-  // Find the separator between content and suffix within this block.
-  // When another $offload follows: use FIRST separator (clear block boundary).
-  // For a lone block: use LAST separator (handles multi-paragraph content).
+  // If both exist, use whichever comes first as the boundary
+  const endMarkerIdx = endMarker ? (endMarker.index as number) : Infinity;
+  const nextOffloadIdx = nextOffload ? (nextOffload.index as number) : Infinity;
+
+  // Content area ends at the nearest boundary marker
+  let contentArea: string;
+  let boundaryEnd: number; // position in afterMarker where content area + boundary ends
+
+  if (endMarkerIdx < nextOffloadIdx) {
+    // $/offload found — use it as the explicit end boundary
+    contentArea = afterMarker.slice(0, endMarkerIdx);
+    const endMarkerLen = endMarker[0].length;
+    boundaryEnd = endMarkerIdx + endMarkerLen;
+    // Skip trailing newlines after the end marker
+    const trailing = afterMarker.slice(boundaryEnd).match(/^\n+/);
+    if (trailing) boundaryEnd += trailing[0].length;
+  } else if (nextOffload) {
+    // Next $offload found (and no $/offload before it) — content = up to next $offload
+    contentArea = afterMarker.slice(0, nextOffloadIdx);
+    boundaryEnd = nextOffloadIdx;
+  } else {
+    // No boundary marker — content area is everything remaining
+    contentArea = afterMarker;
+    boundaryEnd = afterMarker.length;
+  }
+
+  // When $/offload or next $offload provides an explicit boundary,
+  // treat everything in contentArea as offload payload (no blank-line split).
+  if (endMarkerIdx < nextOffloadIdx || (nextOffload && endMarkerIdx >= nextOffloadIdx)) {
+    // Explicit boundary exists — all contentArea is offload content
+    const content = contentArea.trim();
+    const gapSize = leadingGap ? leadingGap[0].length : 0;
+    // suffix = everything after the boundary marker in afterMarker
+    const remaining = afterMarker.slice(boundaryEnd).trim();
+    return {
+      shouldOffload: true,
+      content: content || contentArea.trim(),
+      prefix: text.slice(markerStart, markerEnd).trim(),
+      beforeText: beforeMarker,
+      suffix: remaining,
+      start: markerStart,
+      end: markerEnd + gapSize + boundaryEnd,
+    };
+  }
+
+  // No explicit boundary — fall back to double-blank-line detection.
+  // Walk backwards through separators, skipping any whose suffix looks
+  // like paste/log data. Only split when the suffix is conversational.
   const re = /(\n\s*\n\s*)+/g;
   const separatorMatches = [...contentArea.matchAll(re)];
 
-  // Select the right separator.
-  // - For multiple blocks: explicit $offload boundary — all bounded content
-  //   is offload payload; don't split on internal blank lines.
-  // - For a lone block: walk backwards through separators, skipping any
-  //   whose suffix looks like paste/log data. Only split when the suffix
-  //   is conversational (a real user question). This prevents machine
-  //   output with internal blank-line gaps from being half-offloaded.
   let separator: RegExpMatchArray | undefined;
-  if (nextOffload) {
-    // Explicit boundary from next $offload — pass through to the
-    // "no separator" case below, which treats all contentArea as content.
-    separator = undefined;
-  } else {
-    for (let i = separatorMatches.length - 1; i >= 0; i--) {
-      const sep = separatorMatches[i];
-      const sepEnd = (sep.index as number) + sep[0].length;
-      const testSuffix = contentArea.slice(sepEnd).trim();
-      // Only split here if the suffix looks like a real user question,
-      // not more machine output that should be offloaded too.
-      if (testSuffix && !isPaste(testSuffix)) {
-        separator = sep;
-        break;
-      }
+  for (let i = separatorMatches.length - 1; i >= 0; i--) {
+    const sep = separatorMatches[i];
+    const sepEnd = (sep.index as number) + sep[0].length;
+    const testSuffix = contentArea.slice(sepEnd).trim();
+    // Only split here if the suffix looks like a real user question,
+    // not more machine output that should be offloaded too.
+    if (testSuffix && !isPaste(testSuffix)) {
+      separator = sep;
+      break;
     }
   }
 
@@ -473,12 +518,14 @@ function findPasteBoundary(text: string): { pasteContent: string; suffix: string
 // ── Extension ───────────────────────────────────────────────────
 
 export default function offloader(pi: ExtensionAPI) {
-  let autoDetect = process.env.PI_OFFLOADER_AUTO_DETECT?.toLowerCase() !== 'false';
+  let autoDetect = process.env.PI_OFFLOADER_AUTO_DETECT?.toLowerCase() === 'true';
 
   pi.on('session_start', (_event, ctx) => {
     cleanup();
-    if (!autoDetect) {
-      ctx.ui.setStatus('offloader', 'Auto-detect OFF');
+    if (autoDetect) {
+      ctx.ui.setStatus('offloader', 'Auto-detect ON');
+    } else {
+      ctx.ui.setStatus('offloader', 'Stable');
     }
   });
 
@@ -488,10 +535,10 @@ export default function offloader(pi: ExtensionAPI) {
       autoDetect = !autoDetect;
       const state = autoDetect ? 'ON' : 'OFF';
       ctx.ui.notify(`Offloader auto-detect: ${state}`, 'info');
-      if (!autoDetect) {
-        ctx.ui.setStatus('offloader', 'Auto-detect OFF');
+      if (autoDetect) {
+        ctx.ui.setStatus('offloader', 'Auto-detect ON');
       } else {
-        ctx.ui.setStatus('offloader', undefined);
+        ctx.ui.setStatus('offloader', 'Stable');
       }
     },
   });
@@ -518,7 +565,7 @@ export default function offloader(pi: ExtensionAPI) {
 
         // Replace offload block inline: everything before + summary + everything after
         const after = result.slice(parsed.end);
-        const spacer = after.trim() ? '\n\n' : '';
+        const spacer = after.trim() ? '\n' : '';
         result = result.slice(0, parsed.start) + summary + spacer + after.trim();
       } catch (_) {
         break;
@@ -567,7 +614,6 @@ export default function offloader(pi: ExtensionAPI) {
       }
 
       if (suffix) {
-        parts.push('');
         parts.push(suffix);
       }
 
